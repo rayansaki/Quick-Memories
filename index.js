@@ -1,13 +1,45 @@
 import { saveSettingsDebounced, eventSource, event_types } from '../../../../script.js';
-import { extension_settings } from '../../../extensions.js';
+import { extension_settings, getContext, writeExtensionField } from '../../../extensions.js';
 import { loadWorldInfo, saveWorldInfo, reloadEditor, createWorldInfoEntry, world_names } from '../../../world-info.js';
 
 const KEY = 'quick_memory';
 const PIN_ORDER = 9999; // highest Order SillyTavern allows; higher = closer to the bottom of its section
 const NEW_ENTRY_TITLE = 'Pinned Memories';
 const CREATE_VALUE = '__create__';
-const defaults = { book: '', uid: null, pin: true };
-const settings = extension_settings[KEY] = Object.assign({}, defaults, extension_settings[KEY] || {});
+const global = extension_settings[KEY] = extension_settings[KEY] || {};
+global.groups = global.groups || {};
+// Active per-character target. Single characters store it in their card (data.extensions.quick_memory),
+// group chats store it in extension settings keyed by group id.
+const settings = { book: '', uid: null, pin: true };
+let ownerLabel = '';   // character / group name shown in the header
+let hasOwner = false;  // false when no chat is open
+
+function readOwnerSettings() {
+    const ctx = getContext();
+    settings.book = ''; settings.uid = null; ownerLabel = ''; hasOwner = false;
+    if (ctx.groupId) {
+        const g = (ctx.groups || []).find(x => String(x.id) === String(ctx.groupId));
+        const s = global.groups[ctx.groupId] || {};
+        settings.book = s.book || ''; settings.uid = s.uid ?? null;
+        ownerLabel = g?.name || 'Group'; hasOwner = true;
+    } else if (ctx.characterId !== undefined && ctx.characterId !== null && ctx.characters[ctx.characterId]) {
+        const ch = ctx.characters[ctx.characterId];
+        const s = ch.data?.extensions?.[KEY] || {};
+        settings.book = s.book || ''; settings.uid = s.uid ?? null;
+        ownerLabel = ch.name; hasOwner = true;
+    }
+}
+
+async function writeOwnerSettings() {
+    const ctx = getContext();
+    const value = { book: settings.book, uid: settings.uid };
+    if (ctx.groupId) {
+        global.groups[ctx.groupId] = value;
+        saveSettingsDebounced();
+    } else if (ctx.characterId !== undefined && ctx.characters[ctx.characterId]) {
+        await writeExtensionField(ctx.characterId, KEY, value);
+    }
+}
 
 // ---------- per-browser UI state ----------
 const LS = 'qm_ui';
@@ -26,7 +58,7 @@ const toLines = (content) => String(content || '').split('\n').map(s => s.trim()
 const oneLine = (text) => String(text || '').replace(/\s*\n\s*/g, ' ').trim();
 
 async function getTarget() {
-    if (!settings.book || settings.uid === null || settings.uid === undefined) return { error: 'Choose a lorebook and entry in Extensions → Quick Memory.' };
+    if (!settings.book || settings.uid === null || settings.uid === undefined) return { error: hasOwner ? 'Choose a lorebook and entry above.' : 'Open a chat with a character.' };
     const data = await loadWorldInfo(settings.book);
     if (!data?.entries) return { error: `Lorebook "${settings.book}" not found.` };
     const entry = data.entries[settings.uid];
@@ -51,7 +83,6 @@ async function modifyLines(mutate) {
 async function renderList({ scrollToEnd = false } = {}) {
     const list = $('#qm_list');
     if (!list.length) return;
-    updateTarget();
     hideMenu();
     const t = await getTarget();
     list.empty();
@@ -67,10 +98,9 @@ async function renderList({ scrollToEnd = false } = {}) {
     if (scrollToEnd) list.scrollTop(list[0].scrollHeight);
 }
 
-function updateTarget() {
-    $('#qm_target').text(settings.book && settings.uid !== null ? `${settings.book} / ${entryLabelCache || '#' + settings.uid}` : '');
+function updateTitle() {
+    $('#qm_title').text(ownerLabel ? `Memories — ${ownerLabel}` : 'Memories');
 }
-let entryLabelCache = '';
 
 // ---------- item menu ----------
 let menuIndex = null;
@@ -159,6 +189,14 @@ function clampIntoView(win) {
     el.style.top = Math.min(Math.max(0, r.top), Math.max(0, window.innerHeight - 40)) + 'px';
 }
 
+function setPanelOpen(open, { remember = true } = {}) {
+    const win = $('#qm_window');
+    win.toggleClass('qm-hidden', !open);
+    $('#qm_tab').toggleClass('qm-hidden', open);
+    if (open) { clampIntoView(win); renderList({ scrollToEnd: true }); }
+    if (remember) saveUi({ open });
+}
+
 function buildPanel() {
     const ui = loadUi();
     const tab = $('<div id="qm_tab" title="Quick Memory">Memories</div>');
@@ -169,7 +207,10 @@ function buildPanel() {
                 <span id="qm_refresh" class="qm-icon fa-solid fa-rotate" title="Refresh"></span>
                 <span id="qm_close" class="qm-icon fa-solid fa-minus" title="Minimise"></span>
             </div>
-            <div id="qm_target"></div>
+            <div id="qm_settings">
+                <select id="qm_set_book" class="text_pole" title="Lorebook"></select>
+                <select id="qm_set_entry" class="text_pole" title="Entry"></select>
+            </div>
             <div id="qm_list"></div>
             <div id="qm_split" title="Drag to resize"></div>
             <div id="qm_input">
@@ -194,15 +235,8 @@ function buildPanel() {
     });
     if (ui.listHeight) $('#qm_list').css('height', ui.listHeight);
 
-    const show = (open) => {
-        win.toggleClass('qm-hidden', !open);
-        tab.toggleClass('qm-hidden', open);
-        if (open) { clampIntoView(win); renderList({ scrollToEnd: true }); }
-        saveUi({ open });
-    };
-    show(!!ui.open);
-    tab.on('click', () => show(true));
-    $('#qm_close').on('click', () => show(false));
+    tab.on('click', () => setPanelOpen(true));
+    $('#qm_close').on('click', () => setPanelOpen(false));
     $('#qm_refresh').on('click', () => renderList());
 
     // drag window by header
@@ -271,10 +305,10 @@ function buildPanel() {
     $('#qm_text').on('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addMemory(); } });
 }
 
-// ---------- settings drawer ----------
+// ---------- settings row (top of window) ----------
 function fillBooks() {
-    const sel = $('#qm_set_book').empty();
-    sel.append($('<option value="">').text('— choose a lorebook —'));
+    const sel = $('#qm_set_book').empty().prop('disabled', !hasOwner);
+    sel.append($('<option value="">').text(hasOwner ? '— choose a lorebook —' : '— no chat open —'));
     [...(world_names || [])].sort((a, b) => a.localeCompare(b)).forEach(n => sel.append($('<option>').val(n).text(n)));
     if (settings.book && !(world_names || []).includes(settings.book)) sel.append($('<option>').val(settings.book).text(settings.book + ' (missing)'));
     sel.val(settings.book || '');
@@ -282,27 +316,26 @@ function fillBooks() {
 
 async function fillEntries() {
     const sel = $('#qm_set_entry').empty();
-    entryLabelCache = '';
-    if (!settings.book) { sel.append($('<option value="">').text('— choose a lorebook first —')).prop('disabled', true); updateTarget(); return; }
-    sel.prop('disabled', false);
+    if (!hasOwner || !settings.book) { sel.append($('<option value="">').text('— choose a lorebook first —')).prop('disabled', true); return; }
+    const book = settings.book;
+    const data = await loadWorldInfo(book);
+    if (book !== settings.book) return; // character switched while loading
+    sel.empty().prop('disabled', false);
     sel.append($('<option value="">').text('— choose an entry —'));
-    const data = await loadWorldInfo(settings.book);
     const entries = Object.values(data?.entries || {}).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.uid - b.uid);
     entries.forEach(e => sel.append($('<option>').val(String(e.uid)).text(`${e.comment || '(untitled)'}  [#${e.uid}]`)));
     sel.append($('<option>').val(CREATE_VALUE).text(`+ Create "${NEW_ENTRY_TITLE}" entry`));
     const cur = entries.find(e => e.uid === settings.uid);
-    if (cur) { sel.val(String(cur.uid)); entryLabelCache = cur.comment || '(untitled)'; } else sel.val('');
-    updateTarget();
+    sel.val(cur ? String(cur.uid) : '');
 }
 
 async function createPinnedEntry() {
     const data = await loadWorldInfo(settings.book);
     if (!data?.entries) { toastr.error('Could not load that lorebook.'); return null; }
-    const existing = Object.values(data.entries);
-    // Use the same insertion position most entries in this book use (e.g. MemoryBooks' entries),
+    // Use the insertion position most entries in this book use (e.g. MemoryBooks' entries),
     // because Order only sorts entries within the same position.
     const counts = {};
-    existing.forEach(e => { counts[e.position] = (counts[e.position] || 0) + 1; });
+    Object.values(data.entries).forEach(e => { counts[e.position] = (counts[e.position] || 0) + 1; });
     const commonPos = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
 
     const entry = createWorldInfoEntry(settings.book, data);
@@ -319,68 +352,46 @@ async function createPinnedEntry() {
     return entry.uid;
 }
 
-function buildSettings() {
-    const html = $(`
-        <div class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Quick Memory</b>
-                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-            </div>
-            <div class="inline-drawer-content">
-                <label for="qm_set_book">Lorebook</label>
-                <select id="qm_set_book" class="text_pole"></select>
-                <label for="qm_set_entry">Entry</label>
-                <select id="qm_set_entry" class="text_pole"></select>
-                <label class="checkbox_label">
-                    <input id="qm_set_pin" type="checkbox">
-                    <span>Pin entry to the bottom (Order ${PIN_ORDER}, set on every change)</span>
-                </label>
-            </div>
-        </div>`);
-    $('#extensions_settings2').append(html);
-
-    fillBooks();
-    fillEntries();
+function bindSettingsRow() {
     // lorebooks may be created/renamed later: refresh the list whenever the dropdown is opened
     $('#qm_set_book').on('mousedown focus', () => { const v = $('#qm_set_book').val(); fillBooks(); $('#qm_set_book').val(v); });
     $('#qm_set_book').on('change', async (e) => {
         settings.book = e.target.value;
         settings.uid = null;
-        saveSettingsDebounced();
+        await writeOwnerSettings();
         await fillEntries();
         renderList();
     });
     $('#qm_set_entry').on('change', async (e) => {
         const v = e.target.value;
-        if (v === CREATE_VALUE) {
-            const uid = await createPinnedEntry();
-            settings.uid = uid ?? null;
-        } else {
-            settings.uid = v === '' ? null : Number(v);
-        }
-        saveSettingsDebounced();
+        if (v === CREATE_VALUE) settings.uid = (await createPinnedEntry()) ?? null;
+        else settings.uid = v === '' ? null : Number(v);
+        await writeOwnerSettings();
         await fillEntries();
         renderList({ scrollToEnd: true });
     });
-    $('#qm_set_pin').prop('checked', settings.pin).on('change', e => { settings.pin = e.target.checked; saveSettingsDebounced(); });
 }
 
-// migrate v1.0/1.1 settings (entry stored by title)
-async function migrate() {
-    if (settings.uid === null && settings.entry && settings.book) {
-        const data = await loadWorldInfo(settings.book);
-        const e = Object.values(data?.entries || {}).find(x => (x.comment || '').trim() === settings.entry.trim());
-        if (e) settings.uid = e.uid;
-    }
-    delete settings.entry;
-    delete settings.prefix;
-    saveSettingsDebounced();
+/** Called on startup and every time the chat changes. */
+async function onChatChanged() {
+    const before = ownerLabel;
+    readOwnerSettings();
+    updateTitle();
+    $('#qm_tab').toggleClass('qm-nochat', !hasOwner);
+    if (!hasOwner) setPanelOpen(false); // chat closed → minimise (stays minimised for the next chat)
+    else if (loadUi().open) setPanelOpen(true, { remember: false });
+    if (before !== ownerLabel) { $('#qm_text').val(''); setStatus(''); }
+    fillBooks();
+    await fillEntries();
+    renderList({ scrollToEnd: true });
 }
 
 jQuery(async () => {
-    await migrate();
-    buildSettings();
+    delete global.book; delete global.uid; delete global.entry; delete global.prefix; delete global.pin; // old global settings
     buildPanel();
+    bindSettingsRow();
+    await onChatChanged();
+    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     // keep in sync when the lorebook is edited elsewhere (WI editor, MemoryBooks)
     eventSource.on(event_types.WORLDINFO_UPDATED, (name) => {
         if (name !== settings.book) return;

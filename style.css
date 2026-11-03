@@ -33,7 +33,7 @@
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
     font-size: 0.92em;
 }
-#qm_window.qm-hidden, #qm_tab.qm-hidden { display: none; }
+#qm_window.qm-hidden, #qm_tab.qm-hidden, #qm_tab.qm-nochat { display: none; }
 
 #qm_header {
     display: flex;
@@ -47,7 +47,6 @@
 #qm_title { flex: 1; font-weight: bold; font-size: 1.15em; }
 .qm-icon { cursor: pointer; opacity: 0.7; padding: 2px 4px; }
 .qm-icon:hover { opacity: 1; }
-#qm_target { padding: 0 12px 6px; opacity: 0.6; font-size: 0.82em; word-break: break-word; }
 
 #qm_list {
     flex: 0 0 auto;
@@ -118,3 +117,6 @@
 #qm_footer { display: flex; align-items: center; gap: 8px; }
 #qm_status { flex: 1; font-size: 0.85em; opacity: 0.8; }
 #qm_add { margin: 0; }
+
+#qm_settings { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 8px; }
+#qm_settings select { flex: 1; min-width: 0; margin: 0; font-size: 0.85em; padding: 3px 4px; }
